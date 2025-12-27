@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Realtime Location Sharing</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <!-- Leaflet CSS -->
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+    crossorigin=""
+  />
+
+  <style>
+    body {
+      margin: 0;
+      font-family: sans-serif;
+    }
+    #map {
+      height: 100vh;
+      width: 100vw;
+    }
+    #top-bar {
+      position: absolute;
+      top: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 1000;
+      background: rgba(255, 255, 255, 0.9);
+      padding: 8px 12px;
+      border-radius: 4px;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+      font-size: 14px;
+    }
+    #top-bar input {
+      padding: 4px 6px;
+      margin-right: 4px;
+    }
+    #top-bar button {
+      padding: 4px 8px;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div id="top-bar">
+    <input id="roomIdInput" placeholder="Room ID (e.g. trip-123)" />
+    <input id="usernameInput" placeholder="Name (optional)" />
+    <button id="joinBtn">Join</button>
+    <span id="statusText"></span>
+  </div>
+  <div id="map"></div>
+
+  <!-- Socket.IO client -->
+  <script src="/socket.io/socket.io.js"></script>
+
+  <!-- Leaflet JS -->
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+    integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+    crossorigin=""
+  ></script>
+
+  <script>
+    const socket = io();
+    const markers = {}; // socketId -> Leaflet marker
+
+    const statusText = document.getElementById('statusText');
+    const joinBtn = document.getElementById('joinBtn');
+    const roomIdInput = document.getElementById('roomIdInput');
+    const usernameInput = document.getElementById('usernameInput');
+
+    // init map with a default view (will recenter on user location later)
+    const map = L.map('map').setView([20.5937, 78.9629], 5); // India center-ish
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    joinBtn.addEventListener('click', () => {
+      const roomId = roomIdInput.value.trim() || 'default-room';
+      const username = usernameInput.value.trim() || undefined;
+
+      socket.emit('joinRoom', { roomId, username });
+      statusText.textContent = `Joined room: ${roomId}`;
+
+      startLocationTracking();
+    });
+
+    // Function to get address from coordinates
+    function getAddress(lat, lng) {
+      const url = `https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}`;
+      return fetch(url)
+        .then(response => response.json())
+        .then(data => data.display_name || 'Address not found');
+    }
+
+    // Add or update a marker for a user
+    function upsertMarker({ socketId, lat, lng, username }) {
+      if (markers[socketId]) {
+        markers[socketId].setLatLng([lat, lng]);
+        getAddress(lat, lng).then(address => {
+          markers[socketId].bindPopup(`${username || socketId}<br>${address}`).openPopup();
+        });
+      } else {
+        const marker = L.marker([lat, lng]).addTo(map);
+        getAddress(lat, lng).then(address => {
+          marker.bindPopup(`${username || socketId}<br>${address}`).openPopup();
+        });
+        markers[socketId] = marker;
+      }
+    }
+
+    // Remove marker when user disconnects
+    function removeMarker(socketId) {
+      const marker = markers[socketId];
+      if (marker) {
+        map.removeLayer(marker);
+        delete markers[socketId];
+      }
+    }
+
+    // receive existing users on join
+    socket.on('existingUsers', (users) => {
+      users.forEach((u) => upsertMarker(u));
+    });
+
+    // receive live location updates
+    socket.on('locationUpdate', (data) => {
+      upsertMarker(data);
+    });
+
+    // handle disconnect
+    socket.on('userDisconnected', ({ socketId }) => {
+      removeMarker(socketId);
+    });
+
+    // Use the Geolocation API to watch position
+    function startLocationTracking() {
+      if (!('geolocation' in navigator)) {
+        alert('Geolocation is not available in this browser.');
+        return;
+      }
+
+      navigator.geolocation.watchPosition(
+        (position) => {
+          const { latitude, longitude } = position.coords;
+
+          // center map on first fix
+          if (!markers[socket.id]) {
+            map.setView([latitude, longitude], 15);
+          }
+
+          socket.emit('updateLocation', {
+            lat: latitude,
+            lng: longitude
+          });
+        },
+        (error) => {
+          console.error('Geolocation error:', error);
+          alert('Unable to retrieve your location.');
+        },
+        {
+          enableHighAccuracy: true,
+          maximumAge: 5000,
+          timeout: 10000
+        }
+      );
+    }
+  </script>
+</body>
+</html>
